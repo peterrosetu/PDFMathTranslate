@@ -41,6 +41,8 @@ pip install pdf2zh
 
 命令行中执行翻译指令，在工作目录下生成翻译文档 `example-zh.pdf` 和双语对照文档 `example-dual.pdf`，默认使用 Google 作为翻译服务
 
+有关如何设置环境变量，请参考 [ChatGPT](https://chatgpt.com/share/6734a83d-9d48-800e-8a46-f57ca6e8bcb4)
+
 ### 翻译完整文档
 
 ```bash
@@ -84,7 +86,7 @@ pdf2zh example.pdf -s deepl
 pdf2zh example.pdf -s ollama:gemma2
 ```
 
-### 使用 OpenAI/SiliconCloud 翻译
+### 使用 OpenAI/SiliconCloud/Zhipu 翻译
 
 参考 [SiliconCloud](https://docs.siliconflow.cn/quickstart), [Zhipu](https://open.bigmodel.cn/dev/api/thirdparty-frame/openai-sdk)
 
