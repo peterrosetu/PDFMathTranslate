@@ -11,7 +11,7 @@ setup(
     long_description=readme,
     long_description_content_type="text/markdown",
     description="Latex PDF Translator",
-    license="MIT",
+    license="AGPLv3",
     version=__version__,
     author=__author__,
     author_email="byaidux@gmail.com",
@@ -27,7 +27,7 @@ setup(
         "doclayout-yolo",
         "numpy",
         "ollama",
-        "deepl",
+        "deepl<1.19.1",
         "openai",
     ],
     classifiers=[
