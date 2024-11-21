@@ -8,6 +8,26 @@ import gradio as gr
 import numpy as np
 import pymupdf
 
+# Map service names to pdf2zh service options
+service_map = {
+    "Google": "google",
+    "DeepL": "deepl",
+    "DeepLX": "deeplx",
+    "Ollama": "ollama",
+    "OpenAI": "openai",
+    "Azure": "azure",
+}
+lang_map = {
+    "Chinese": "zh",
+    "English": "en",
+    "French": "fr",
+    "German": "de",
+    "Japanese": "ja",
+    "Korean": "ko",
+    "Russian": "ru",
+    "Spanish": "es",
+}
+
 
 def pdf_preview(file):
     doc = pymupdf.open(file)
@@ -34,11 +54,18 @@ def upload_file(file, service, progress=gr.Progress()):
 
 
 def translate(
-    file_path, service, lang_to, page_range, extra_args, progress=gr.Progress()
+    file_path, service, model_id, lang, page_range, extra_args, progress=gr.Progress()
 ):
     """Translate PDF content using selected service."""
     if not file_path:
-        return None, None, gr.update(visible=False)
+        return (
+            None,
+            None,
+            None,
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+        )
 
     progress(0, desc="Starting translation...")
 
@@ -53,16 +80,8 @@ def translate(
         with open(file_path, "rb") as src, open(input_pdf, "wb") as dst:
             dst.write(src.read())
 
-        # Map service names to pdf2zh service options
-        service_map = {
-            "Google": "google",
-            "DeepL": "deepl",
-            "DeepLX": "deeplx",
-            "Ollama": "ollama:gemma2",
-            "Azure": "azure",
-        }
         selected_service = service_map.get(service, "google")
-        lang_to = "zh"
+        lang_to = lang_map.get(lang, "zh")
 
         # Execute translation in temp directory with real-time progress
         progress(0.3, desc=f"Starting translation with {selected_service}...")
@@ -71,27 +90,10 @@ def translate(
         output_dir = Path("gradio_files") / "outputs"
         output_dir.mkdir(parents=True, exist_ok=True)
         final_output = output_dir / f"translated_{os.path.basename(file_path)}"
+        final_output_dual = output_dir / f"dual_{os.path.basename(file_path)}"
+
         # Prepare extra arguments
         extra_args = extra_args.strip()
-        lang_to = lang_to.lower()
-        if lang_to == "chinese":
-            lang_to = "zh"
-        elif lang_to == "english":
-            lang_to = "en"
-        elif lang_to == "french":
-            lang_to = "fr"
-        elif lang_to == "german":
-            lang_to = "de"
-        elif lang_to == "japanese":
-            lang_to = "ja"
-        elif lang_to == "korean":
-            lang_to = "ko"
-        elif lang_to == "russian":
-            lang_to = "ru"
-        elif lang_to == "spanish":
-            lang_to = "es"
-        else:
-            lang_to = "zh"  # Default to Chinese
         # Add page range arguments
         if page_range == "All":
             extra_args += ""
@@ -101,10 +103,11 @@ def translate(
             extra_args += " -p 1-5"
 
         # Execute translation command
-        if selected_service == "google" and lang_to == "zh":
-            command = (
-                f'cd "{temp_path}" && pdf2zh "{input_pdf}" -lo "zh-CN" {extra_args}'
-            )
+        if selected_service == "google":
+            lang_to = "zh-CN" if lang_to == "zh" else lang_to
+
+        if selected_service in ["ollama", "openai"]:
+            command = f'cd "{temp_path}" && pdf2zh "{input_pdf}" -lo {lang_to} -s {selected_service}:{model_id} {extra_args}'
         else:
             command = f'cd "{temp_path}" && pdf2zh "{input_pdf}" -lo {lang_to} -s {selected_service} {extra_args}'
         print(f"Executing command: {command}")
@@ -138,17 +141,31 @@ def translate(
         print(f"Command completed with return code: {return_code}")
 
         # Check if translation was successful
-        translated_file = temp_path / f"input-{lang_to}.pdf"
+        translated_file = temp_path / "input-zh.pdf" # <= Do not change filename
+        dual_file = temp_path / "input-dual.pdf"
         print(f"Files after translation: {os.listdir(temp_path)}")
 
-        if not translated_file.exists():
-            print(f"Translation failed: Output file not found at {translated_file}")
-            return None, None, gr.update(visible=False)
+        if not translated_file.exists() and not dual_file.exists():
+            print("Translation failed: No output files found")
+            return (
+                None,
+                None,
+                None,
+                gr.update(visible=False),
+                gr.update(visible=False),
+                gr.update(visible=False),
+            )
 
-        # Copy the translated file to a permanent location
-        progress(0.8, desc="Saving translated file...")
-        with open(translated_file, "rb") as src, open(final_output, "wb") as dst:
-            dst.write(src.read())
+        # Copy the translated files to permanent locations
+        progress(0.8, desc="Saving translated files...")
+
+        if translated_file.exists():
+            with open(translated_file, "rb") as src, open(final_output, "wb") as dst:
+                dst.write(src.read())
+
+        if dual_file.exists():
+            with open(dual_file, "rb") as src, open(final_output_dual, "wb") as dst:
+                dst.write(src.read())
 
         # Generate preview of translated PDF
         progress(0.9, desc="Generating preview...")
@@ -159,12 +176,19 @@ def translate(
             translated_preview = None
 
     progress(1.0, desc="Translation complete!")
-    return str(final_output), translated_preview, gr.update(visible=True)
+    return (
+        str(final_output),
+        translated_preview,
+        str(final_output_dual),
+        gr.update(visible=True),
+        gr.update(visible=True),
+        gr.update(visible=True),
+    )
 
 
 # Global setup
 with gr.Blocks(
-    title="PDF2ZH - PDF Translation with preserved formats",
+    title="PDFMathTranslate - PDF Translation with preserved formats",
     css="""
     .secondary-text {color: #999 !important;}
     footer {visibility: hidden}
@@ -172,7 +196,7 @@ with gr.Blocks(
     .env-success {color: #559900 !important;}
     """,
 ) as demo:
-    gr.Markdown("# PDF Translation")
+    gr.Markdown("# PDFMathTranslate")
 
     with gr.Row():
         with gr.Column(scale=1):
@@ -187,7 +211,7 @@ with gr.Blocks(
             service = gr.Dropdown(
                 label="Service",
                 info="Which translation service to use. Some require keys",
-                choices=["Google", "DeepL", "DeepLX", "Ollama", "Azure"],
+                choices=service_map.keys(),
                 value="Google",
             )
             # lang_src = gr.Dropdown(
@@ -199,16 +223,7 @@ with gr.Blocks(
             lang_to = gr.Dropdown(
                 label="Translate to",
                 info="Which language to translate to (optional)",
-                choices=[
-                    "Chinese",
-                    "English",
-                    "French",
-                    "German",
-                    "Japanese",
-                    "Korean",
-                    "Russian",
-                    "Spanish",
-                ],
+                choices=lang_map.keys(),
                 value="Chinese",
             )
             page_range = gr.Radio(
@@ -216,6 +231,12 @@ with gr.Blocks(
                 label="Pages",
                 info="Translate the full document or just few pages (optional)",
                 value="All",
+            )
+            model_id = gr.Textbox(
+                label="Model ID",
+                info="Please enter the identifier of the model you wish to use (e.g., gemma2). This identifier will be used to specify the particular model for translation.",
+                # value="gemma2",
+                visible=False,  # hide by default
             )
             extra_args = gr.Textbox(
                 label="Advanced Arguments",
@@ -229,6 +250,7 @@ with gr.Blocks(
                 <details>
                     <summary>Technical details</summary>
                     {text_markdown}
+                    - GitHub: <a href="https://github.com/Byaidu/PDFMathTranslate">Byaidu/PDFMathTranslate</a><br>
                     - GUI by: <a href="https://github.com/reycn">Rongxin</a>    
                 </details>"""
                 return text
@@ -253,6 +275,8 @@ with gr.Blocks(
                 return details_wrapper(envs_status)
 
             def on_select_service(value, evt: gr.EventData):
+                # hide model id by default
+                model_visibility = gr.update(visible=False)
                 # add a text description
                 if value == "Google":
                     envs_status = details_wrapper(
@@ -266,20 +290,30 @@ with gr.Blocks(
                 elif value == "Azure":
                     envs_status = env_var_checker("AZURE_APIKEY")
                 elif value == "OpenAI":
+                    model_visibility = gr.update(
+                        visible=True, value="gpt-4o"
+                    )  # show model id when service is selected
                     envs_status = env_var_checker("OPENAI_API_KEY")
                 elif value == "Ollama":
+                    model_visibility = gr.update(
+                        visible=True, value="gemma2"
+                    )  # show model id when service is selected
                     envs_status = env_var_checker("OLLAMA_HOST")
                 else:
                     envs_status = "<span class='env-warning'>- Warning: model not in the list.</span><br>- Please report via (<a href='https://github.com/Byaidu/PDFMathTranslate'>guide</a>).<br>"
-                return envs_status
+                return envs_status, model_visibility
 
+            output_title = gr.Markdown("## Translated", visible=False)
             output_file = gr.File(label="Download Translation", visible=False)
+            output_file_dual = gr.File(
+                label="Download Translation (Dual)", visible=False
+            )
             translate_btn = gr.Button("Translate", variant="primary", visible=False)
             tech_details_tog = gr.Markdown(
                 details_wrapper(envs_status),
                 elem_classes=["secondary-text"],
             )
-            service.select(on_select_service, service, tech_details_tog)
+            service.select(on_select_service, service, [tech_details_tog, model_id])
 
         with gr.Column(scale=2):
             gr.Markdown("## Preview")
@@ -294,15 +328,36 @@ with gr.Blocks(
 
     translate_btn.click(
         translate,
-        inputs=[file_input, service, lang_to, page_range, extra_args],
-        outputs=[output_file, preview, output_file],
+        inputs=[file_input, service, model_id, lang_to, page_range, extra_args],
+        outputs=[
+            output_file,
+            preview,
+            output_file_dual,
+            output_file,
+            output_file_dual,
+            output_title,
+        ],
     )
 
 
 def setup_gui():
-    demo.launch(debug=True, inbrowser=True, share=False)
+    try:
+        demo.launch(server_name="0.0.0.0", debug=True, inbrowser=True, share=False)
+    except Exception:
+        print(
+            "Error launching GUI using 0.0.0.0.\nThis may be caused by global mode of proxy software."
+        )
+        try:
+            demo.launch(
+                server_name="127.0.0.1", debug=True, inbrowser=True, share=False
+            )
+        except Exception:
+            print(
+                "Error launching GUI using 127.0.0.1.\nThis may be caused by global mode of proxy software."
+            )
+            demo.launch(server_name="0.0.0.0", debug=True, inbrowser=True, share=True)
 
 
 # For auto-reloading while developing
 if __name__ == "__main__":
-    demo.launch(debug=True, inbrowser=True, share=False)
+    setup_gui()
