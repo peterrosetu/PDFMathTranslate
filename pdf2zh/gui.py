@@ -2,6 +2,7 @@ import asyncio
 import cgi
 import os
 import shutil
+import socket
 import uuid
 from asyncio import CancelledError
 from pathlib import Path
@@ -30,6 +31,7 @@ from pdf2zh.translator import (
     ArgosTranslator,
     GeminiTranslator,
     GoogleTranslator,
+    MiniMaxTranslator,
     ModelScopeTranslator,
     OllamaTranslator,
     OpenAITranslator,
@@ -42,13 +44,32 @@ from pdf2zh.translator import (
     DeepseekTranslator,
     OpenAIlikedTranslator,
     QwenMtTranslator,
+    X302AITranslator,
 )
 from babeldoc.docvision.doclayout import OnnxModel
 from babeldoc import __version__ as babeldoc_version
 
 logger = logging.getLogger(__name__)
 
-BABELDOC_MODEL = OnnxModel.load_available()
+
+class _LazyModel:
+    """Defers model loading until first access so the GUI starts instantly."""
+
+    def __init__(self):
+        self._model = None
+
+    def _ensure_loaded(self):
+        if self._model is None:
+            self._model = OnnxModel.load_available()
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        self._ensure_loaded()
+        return getattr(self._model, name)
+
+
+BABELDOC_MODEL = _LazyModel()
 # The following variables associate strings with translators
 service_map: dict[str, BaseTranslator] = {
     "Google": GoogleTranslator,
@@ -71,8 +92,10 @@ service_map: dict[str, BaseTranslator] = {
     "Grok": GrokTranslator,
     "Groq": GroqTranslator,
     "DeepSeek": DeepseekTranslator,
+    "MiniMax": MiniMaxTranslator,
     "OpenAI-liked": OpenAIlikedTranslator,
     "Ali Qwen-Translation": QwenMtTranslator,
+    "302.AI": X302AITranslator,
 }
 
 # The following variables associate strings with specific languages
@@ -209,7 +232,7 @@ def translate_file(
     skip_subset_fonts,
     ignore_cache,
     vfont,
-    use_babeldoc,
+    mode_choice,
     recaptcha_response,
     state,
     progress=gr.Progress(),
@@ -329,9 +352,30 @@ def translate_file(
     }
 
     try:
-        if use_babeldoc:
-            return babeldoc_translate_file(**param)
-        translate(**param)
+        from pdf2zh.kernel import KernelRegistry
+        from pdf2zh.kernel.protocol import TranslateRequest
+
+        KernelRegistry.switch(mode_choice)
+        kernel = KernelRegistry.get()
+        request = TranslateRequest(
+            files=[str(file_raw)],
+            output=str(output),
+            pages=selected_page,
+            lang_in=lang_from,
+            lang_out=lang_to,
+            service=f"{translator.name}",
+            thread=int(threads),
+            envs=_envs,
+            prompt=str(prompt) if prompt else None,
+            skip_subset_fonts=skip_subset_fonts,
+            ignore_cache=ignore_cache,
+            vfont=vfont,
+        )
+        kernel.translate(
+            request,
+            callback=progress_bar,
+            cancellation_event=cancellation_event_map[session_id],
+        )
     except CancelledError:
         del cancellation_event_map[session_id]
         raise gr.Error("Translation cancelled")
@@ -382,6 +426,7 @@ def babeldoc_translate_file(**kwargs):
         DeepseekTranslator,
         OpenAIlikedTranslator,
         QwenMtTranslator,
+        X302AITranslator,
     ]:
         if kwargs["service"] == translator.name:
             translator = translator(
@@ -518,15 +563,19 @@ tech_details_string = f"""
                 """
 cancellation_event_map = {}
 
+# Gradio 6 takes these styling options in launch() rather than gr.Blocks()
+launch_style_kwargs = {
+    "theme": gr.themes.Default(
+        primary_hue=custom_blue, spacing_size="md", radius_size="lg"
+    ),
+    "css": custom_css,
+    "head": demo_recaptcha if flag_demo else "",
+}
+
 
 # The following code creates the GUI
 with gr.Blocks(
     title="PDFMathTranslate - PDF Translation with preserved formats",
-    theme=gr.themes.Default(
-        primary_hue=custom_blue, spacing_size="md", radius_size="lg"
-    ),
-    css=custom_css,
-    head=demo_recaptcha if flag_demo else "",
 ) as demo:
     gr.Markdown(
         "# [PDFMathTranslate @ GitHub](https://github.com/Byaidu/PDFMathTranslate)"
@@ -543,7 +592,7 @@ with gr.Blocks(
             file_input = gr.File(
                 label="File",
                 file_count="single",
-                file_types=[".pdf"],
+                file_types=[".pdf", ".doc", ".docx"],
                 type="filepath",
                 elem_classes=["input-file"],
             )
@@ -608,8 +657,11 @@ with gr.Blocks(
                 prompt = gr.Textbox(
                     label="Custom Prompt for llm", interactive=True, visible=False
                 )
-                use_babeldoc = gr.Checkbox(
-                    label="Use BabelDOC", interactive=True, value=False
+                mode_choice = gr.Dropdown(
+                    label="Translation Mode",
+                    choices=["fast", "precise"],
+                    value="fast",
+                    interactive=True,
                 )
                 envs.append(prompt)
 
@@ -747,7 +799,7 @@ with gr.Blocks(
             skip_subset_fonts,
             ignore_cache,
             vfont,
-            use_babeldoc,
+            mode_choice,
             recaptcha_response,
             state,
             *envs,
@@ -798,6 +850,16 @@ def parse_user_passwd(file_path: str) -> tuple:
     return tuple_list, content
 
 
+def _has_ipv6() -> bool:
+    """Check whether the system can bind an IPv6 socket."""
+    try:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        sock.close()
+        return True
+    except OSError:
+        return False
+
+
 def setup_gui(
     share: bool = False, auth_file: list = ["", ""], server_port=7860
 ) -> None:
@@ -812,74 +874,56 @@ def setup_gui(
         - None
     """
     user_list, html = parse_user_passwd(auth_file)
+
+    auth_kwargs = {}
+    if len(user_list) > 0:
+        auth_kwargs = {"auth": user_list, "auth_message": html}
+
     if flag_demo:
-        demo.launch(server_name="0.0.0.0", max_file_size="5mb", inbrowser=True)
-    else:
-        if len(user_list) == 0:
-            try:
-                demo.launch(
-                    server_name="0.0.0.0",
-                    debug=True,
-                    inbrowser=True,
-                    share=share,
-                    server_port=server_port,
-                )
-            except Exception:
-                print(
-                    "Error launching GUI using 0.0.0.0.\nThis may be caused by global mode of proxy software."
-                )
-                try:
-                    demo.launch(
-                        server_name="127.0.0.1",
-                        debug=True,
-                        inbrowser=True,
-                        share=share,
-                        server_port=server_port,
-                    )
-                except Exception:
-                    print(
-                        "Error launching GUI using 127.0.0.1.\nThis may be caused by global mode of proxy software."
-                    )
-                    demo.launch(
-                        debug=True, inbrowser=True, share=True, server_port=server_port
-                    )
-        else:
-            try:
-                demo.launch(
-                    server_name="0.0.0.0",
-                    debug=True,
-                    inbrowser=True,
-                    share=share,
-                    auth=user_list,
-                    auth_message=html,
-                    server_port=server_port,
-                )
-            except Exception:
-                print(
-                    "Error launching GUI using 0.0.0.0.\nThis may be caused by global mode of proxy software."
-                )
-                try:
-                    demo.launch(
-                        server_name="127.0.0.1",
-                        debug=True,
-                        inbrowser=True,
-                        share=share,
-                        auth=user_list,
-                        auth_message=html,
-                        server_port=server_port,
-                    )
-                except Exception:
-                    print(
-                        "Error launching GUI using 127.0.0.1.\nThis may be caused by global mode of proxy software."
-                    )
-                    demo.launch(
-                        debug=True,
-                        inbrowser=True,
-                        share=True,
-                        auth=user_list,
-                        auth_message=html,
-                        server_port=server_port,
-                    )
+        demo.launch(
+            server_name="0.0.0.0",
+            max_file_size="5mb",
+            inbrowser=True,
+            **launch_style_kwargs,
+        )
+        return
+
+    # Try binding addresses in order: "::" accepts both IPv4+IPv6 on most
+    # dual-stack systems, "0.0.0.0" is IPv4-only, "127.0.0.1" is loopback,
+    # and finally fall back to Gradio's share mode.
+    bind_addresses = []
+    if _has_ipv6():
+        bind_addresses.append("[::]")
+    bind_addresses.append("0.0.0.0")
+    bind_addresses.append("127.0.0.1")
+
+    for addr in bind_addresses:
+        try:
+            demo.launch(
+                server_name=addr,
+                debug=True,
+                inbrowser=True,
+                share=share,
+                server_port=server_port,
+                **auth_kwargs,
+                **launch_style_kwargs,
+            )
+            return
+        except Exception:
+            print(
+                f"Error launching GUI using {addr}.\n"
+                "This may be caused by global mode of proxy software."
+            )
+
+    # Last resort: let Gradio create a share link
+    demo.launch(
+        debug=True,
+        inbrowser=True,
+        share=True,
+        server_port=server_port,
+        **auth_kwargs,
+        **launch_style_kwargs,
+    )
 
 
 # For auto-reloading while developing

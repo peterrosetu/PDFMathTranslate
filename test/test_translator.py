@@ -6,7 +6,12 @@ from ollama import ResponseError as OllamaResponseError
 
 from pdf2zh import cache
 from pdf2zh.config import ConfigManager
-from pdf2zh.translator import BaseTranslator, OllamaTranslator, OpenAIlikedTranslator
+from pdf2zh.translator import (
+    BaseTranslator,
+    GoogleTranslator,
+    OllamaTranslator,
+    OpenAIlikedTranslator,
+)
 
 # Since it is necessary to test whether the functionality meets the expected requirements,
 # private functions and private methods are allowed to be called.
@@ -81,6 +86,27 @@ class TestTranslator(unittest.TestCase):
         translator = BaseTranslator("en", "zh", "test", False)
         with self.assertRaises(NotImplementedError):
             translator.translate("Hello World")
+
+    @mock.patch("pdf2zh.translator.GoogleTrans")
+    def test_google_translation(self, client):
+        backend = client.return_value.__aenter__.return_value
+        backend.translate.return_value = mock.Mock(text="译文 {v0}\x00")
+        translator = GoogleTranslator("en", "zh", None, envs={}, prompt=None)
+        self.assertEqual(translator.translate("Hello {v0}"), "译文 {v0}")
+        self.assertEqual(translator.translate("Hello {v0}"), "译文 {v0}")
+        client.assert_called_once_with(raise_exception=True, timeout=20)
+        backend.translate.assert_awaited_once_with("Hello {v0}", src="en", dest="zh-CN")
+        client.return_value.__aexit__.assert_awaited_once()
+
+    @mock.patch("pdf2zh.translator.GoogleTrans")
+    def test_google_errors_are_not_cached(self, client):
+        backend = client.return_value.__aenter__.return_value
+        backend.translate.side_effect = RuntimeError("429")
+        translator = GoogleTranslator("en", "zh", None)
+        for _ in range(2):
+            with self.assertRaisesRegex(RuntimeError, "429"):
+                translator.translate("Hello")
+        self.assertEqual(backend.translate.await_count, 2)
 
 
 class TestOpenAIlikedTranslator(unittest.TestCase):
@@ -157,15 +183,13 @@ class TestOllamaTranslator(unittest.TestCase):
         translator = OllamaTranslator(lang_in="en", lang_out="zh", model="test:3b")
         with mock.patch.object(translator, "client") as mock_client:
             chat_response = mock_client.chat.return_value
-            chat_response.message.content = dedent(
-                """\
+            chat_response.message.content = dedent("""\
                 <think>
                 Thinking...
                 </think>
-                    
+
                 天空呈现蓝色是因为...
-                """
-            )
+                """)
 
             text = "The sky appears blue because of..."
             translated_result = translator.do_translate(text)
@@ -185,14 +209,12 @@ class TestOllamaTranslator(unittest.TestCase):
                 mock_client.chat()
 
     def test_remove_cot_content(self):
-        fake_cot_resp_text = dedent(
-            """\
+        fake_cot_resp_text = dedent("""\
             <think>
 
             </think>
 
-            The sky appears blue because of..."""
-        )
+            The sky appears blue because of...""")
         removed_cot_content = OllamaTranslator._remove_cot_content(fake_cot_resp_text)
         excepted_content = "The sky appears blue because of..."
         self.assertEqual(excepted_content, removed_cot_content.strip())

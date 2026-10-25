@@ -7,20 +7,13 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from string import Template
 from typing import List, Optional
 
 from pdf2zh import __version__, log
-from pdf2zh.high_level import translate, download_remote_fonts
-from pdf2zh.doclayout import OnnxModel, ModelInstance
-import os
-
-from pdf2zh.config import ConfigManager
-from babeldoc.translation_config import TranslationConfig as YadtConfig
-from babeldoc.high_level import async_translate as yadt_translate
-from babeldoc.high_level import init as yadt_init
-from babeldoc.main import create_progress_handler
+from pdf2zh.converter_docx import convert_to_pdf, is_convertible
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +25,7 @@ def create_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         nargs="*",
-        help="One or more paths to PDF files.",
+        help="One or more paths to PDF/Word files.",
     )
     parser.add_argument(
         "--version",
@@ -103,8 +96,8 @@ def create_parser() -> argparse.ArgumentParser:
         "--thread",
         "-t",
         type=int,
-        default=4,
-        help="The number of threads to execute translation.",
+        default=None,
+        help="Translation workers: default 4, or 16 with --ultrafast.",
     )
     parse_params.add_argument(
         "--interactive",
@@ -147,9 +140,23 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     parse_params.add_argument(
+        "--ultrafast",
+        action="store_true",
+        help="Use pdf-inspector text layout without neural layout models or OCR.",
+    )
+
+    parse_params.add_argument(
         "--onnx",
         type=str,
         help="custom onnx model path.",
+    )
+
+    parse_params.add_argument(
+        "--backend",
+        type=str,
+        choices=["auto", "cpu", "cuda", "dml"],
+        default="auto",
+        help="ONNX Runtime execution provider: auto, cpu, cuda, dml.",
     )
 
     parse_params.add_argument(
@@ -168,6 +175,14 @@ def create_parser() -> argparse.ArgumentParser:
         "--config",
         type=str,
         help="config file.",
+    )
+
+    parse_params.add_argument(
+        "--mode",
+        type=str,
+        choices=["fast", "precise"],
+        default="fast",
+        help="Translation mode: fast (v1) or precise (v2, requires pdf2zh_next).",
     )
 
     parse_params.add_argument(
@@ -203,7 +218,25 @@ def create_parser() -> argparse.ArgumentParser:
 
 
 def parse_args(args: Optional[List[str]]) -> argparse.Namespace:
-    parsed_args = create_parser().parse_args(args=args)
+    parser = create_parser()
+    parsed_args = parser.parse_args(args=args)
+    if parsed_args.thread is None:
+        parsed_args.thread = 16 if parsed_args.ultrafast else 4
+    if parsed_args.thread < 1:
+        parser.error("--thread must be at least 1")
+    if parsed_args.ultrafast and (
+        parsed_args.mode != "fast"
+        or parsed_args.babeldoc
+        or parsed_args.onnx
+        or parsed_args.interactive
+        or parsed_args.flask
+        or parsed_args.celery
+        or parsed_args.mcp
+        or parsed_args.sse
+    ):
+        parser.error(
+            "--ultrafast requires fast CLI mode without --onnx or server options"
+        )
 
     if parsed_args.pages:
         pages = []
@@ -236,7 +269,7 @@ def find_all_files_in_directory(directory_path):
     for root, _, files in os.walk(directory_path):
         for file in files:
             # Check if the file is a PDF
-            if file.lower().endswith(".pdf"):
+            if file.lower().endswith((".pdf", ".doc", ".docx")):
                 # Append the full file path to the list
                 file_paths.append(os.path.join(root, file))
 
@@ -244,6 +277,8 @@ def find_all_files_in_directory(directory_path):
 
 
 def main(args: Optional[List[str]] = None) -> int:
+    parsed_args = parse_args(args)
+
     from rich.logging import RichHandler
 
     logging.basicConfig(level=logging.INFO, handlers=[RichHandler()])
@@ -258,18 +293,22 @@ def main(args: Optional[List[str]] = None) -> int:
     logging.getLogger("http11").setLevel("CRITICAL")
     logging.getLogger("http11").propagate = False
 
-    parsed_args = parse_args(args)
-
     if parsed_args.config:
+        from pdf2zh.config import ConfigManager
+
         ConfigManager.custome_config(parsed_args.config)
 
     if parsed_args.debug:
         log.setLevel(logging.DEBUG)
 
-    if parsed_args.onnx:
-        ModelInstance.value = OnnxModel(parsed_args.onnx)
-    else:
-        ModelInstance.value = OnnxModel.load_available()
+    if not parsed_args.ultrafast:
+        from pdf2zh.doclayout import ModelInstance, OnnxModel, set_backend
+
+        set_backend(parsed_args.backend)
+        if parsed_args.onnx:
+            ModelInstance.value = OnnxModel(parsed_args.onnx)
+        else:
+            ModelInstance.value = OnnxModel.load_available()
 
     if parsed_args.interactive:
         from pdf2zh.gui import setup_gui
@@ -317,19 +356,58 @@ def main(args: Optional[List[str]] = None) -> int:
         return 0
 
     print(parsed_args)
+
     if parsed_args.babeldoc:
         return yadt_main(parsed_args)
-    if parsed_args.dir:
-        untranlate_file = find_all_files_in_directory(parsed_args.files[0])
-        parsed_args.files = untranlate_file
-        translate(model=ModelInstance.value, **vars(parsed_args))
-        return 0
 
-    translate(model=ModelInstance.value, **vars(parsed_args))
+    # Unified kernel routing — both fast and precise modes go through the registry
+    from pdf2zh.kernel import KernelRegistry
+    from pdf2zh.kernel.protocol import TranslateRequest
+
+    KernelRegistry.switch(parsed_args.mode)  # "fast" or "precise"
+    kernel = KernelRegistry.get()
+
+    if parsed_args.dir:
+        parsed_args.files = find_all_files_in_directory(parsed_args.files[0])
+
+    # Extract prompt text (may be a Template object from file reading above)
+    prompt_text = None
+    if parsed_args.prompt:
+        prompt_text = (
+            parsed_args.prompt.template
+            if hasattr(parsed_args.prompt, "template")
+            else parsed_args.prompt
+        )
+
+    request = TranslateRequest(
+        files=parsed_args.files,
+        output=parsed_args.output,
+        pages=parsed_args.pages,
+        lang_in=parsed_args.lang_in,
+        lang_out=parsed_args.lang_out,
+        service=parsed_args.service,
+        thread=parsed_args.thread,
+        vfont=parsed_args.vfont,
+        vchar=parsed_args.vchar,
+        envs={},
+        prompt=prompt_text,
+        skip_subset_fonts=parsed_args.skip_subset_fonts,
+        ignore_cache=parsed_args.ignore_cache,
+        compatible=parsed_args.compatible,
+        debug=parsed_args.debug,
+        ultrafast=parsed_args.ultrafast,
+    )
+    kernel.translate(request)
     return 0
 
 
 def yadt_main(parsed_args) -> int:
+    from babeldoc.high_level import async_translate as yadt_translate
+    from babeldoc.high_level import init as yadt_init
+    from babeldoc.main import create_progress_handler
+    from babeldoc.translation_config import TranslationConfig as YadtConfig
+    from pdf2zh.high_level import download_remote_fonts
+
     if parsed_args.dir:
         untranlate_file = find_all_files_in_directory(parsed_args.files[0])
     else:
@@ -383,6 +461,7 @@ def yadt_main(parsed_args) -> int:
         DeepseekTranslator,
         OpenAIlikedTranslator,
         QwenMtTranslator,
+        X302AITranslator,
     )
 
     for translator in [
@@ -408,6 +487,7 @@ def yadt_main(parsed_args) -> int:
         DeepseekTranslator,
         OpenAIlikedTranslator,
         QwenMtTranslator,
+        X302AITranslator,
     ]:
         if service_name == translator.name:
             translator = translator(
@@ -425,6 +505,10 @@ def yadt_main(parsed_args) -> int:
 
     for file in untranlate_file:
         file = file.strip("\"'")
+        _converted_pdf = None
+        if is_convertible(file):
+            _converted_pdf = convert_to_pdf(file)
+            file = _converted_pdf
         yadt_config = YadtConfig(
             input_file=file,
             font=font_path,
@@ -458,6 +542,11 @@ def yadt_main(parsed_args) -> int:
                         break
 
         asyncio.run(yadt_translate_coro(yadt_config))
+        if _converted_pdf:
+            try:
+                os.unlink(_converted_pdf)
+            except OSError:
+                pass
     return 0
 
 

@@ -5,6 +5,7 @@
 <h3 id="toc">Table of Contents</h3>
 
 - [Full / partial translation](#partial)
+- [Ultrafast mode](#ultrafast)
 - [Specify source and target languages](#language)
 - [Translate with different services](#services)
 - [Translate wih exceptions](#exceptions)
@@ -35,6 +36,45 @@
 
 ---
 
+<h3 id="ultrafast">Ultrafast mode</h3>
+
+Install the optional `pdf-inspector>=1.25.2,<2` dependency:
+
+```bash
+pip install 'pdf2zh[ultrafast]'
+```
+
+Then run the CLI with `--ultrafast`:
+
+```bash
+pdf2zh example.pdf --ultrafast
+```
+
+This mode uses native PDF text positions from `pdf-inspector` for heuristic
+layout and skips ONNX layout and OCR; pages without native text are preserved
+without OCR. Its heuristic text grouping retains the usual font and character
+formula safeguards. It is best suited to PDFs that already contain native text;
+use normal mode for complex tables or formulas. It is available only in fast
+CLI mode and cannot be combined with `--mode precise`, `--babeldoc`, server or
+GUI modes, or `--onnx`. It automatically skips font subsetting, so its output
+PDFs are larger, while still using BabelDOC font assets as needed. With
+`--ignore-cache`, it bypasses both translation-cache reads and writes; normal
+mode keeps its existing `--ignore-cache` behavior. Ultrafast uses a shared
+whole-document paragraph worker pool with 16 workers by default and submits
+individual paragraph requests; `-t` overrides this value, while normal mode
+keeps its default of 4. `[ultrafast perf]` INFO logs report stage and per-page
+timings. `page_scan` is the paragraph-submission scan; `translation` is the
+elapsed wait for the whole-document pool to drain, including API retries, so
+it is not a sum of per-page waits. `paragraph_parse` covers both passes,
+`typesetting` runs after translation completes, and `layout_extract` is
+reported separately before font setup. `page_processing` includes nested
+`layout_mask`, `paragraph_parse`, `translation`, and `typesetting` timings, so
+do not sum the nested values again. This path does not import ONNX or OpenCV.
+
+[⬆️ Back to top](#toc)
+
+---
+
 <h3 id="language">Specify source and target languages</h3>
 
 See [Google Languages Codes](https://developers.google.com/admin-sdk/directory/v1/languages), [DeepL Languages Codes](https://developers.deepl.com/docs/resources/supported-languages)
@@ -55,14 +95,15 @@ We've provided a detailed table on the required [environment variables](https://
 |----------------------|----------------|-----------------------------------------------------------------------|----------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **Google (Default)** | `google`       | None                                                                  | N/A                                                      | None                                                                                                                                                                                                      |
 | **Bing**             | `bing`         | None                                                                  | N/A                                                      | None                                                                                                                                                                                                      |
+| **302.AI**           | `302ai`       | `X302AI_API_KEY`, `X302AI_MODEL`                                         | `[Your Key]`, `Gemma-7B` | See [302.AI](https://share.302.ai/tqTWfD)                                                                                                                                                   |
+| **OpenAI**           | `openai`       | `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_STOP_TOKENS`, `OPENAI_MAX_TOKENS` | `https://api.openai.com/v1`, `[Your Key]`, `gpt-4o-mini`, ` `, `-1` | See [OpenAI](https://platform.openai.com/docs/overview)                                                                                                                                                   |
 | **DeepL**            | `deepl`        | `DEEPL_AUTH_KEY`                                                      | `[Your Key]`                                             | See [DeepL](https://support.deepl.com/hc/en-us/articles/360020695820-API-Key-for-DeepL-s-API)                                                                                                             |
 | **DeepLX**           | `deeplx`       | `DEEPLX_ENDPOINT`                                                     | `https://api.deepl.com/translate`                        | See [DeepLX](https://github.com/OwO-Network/DeepLX)                                                                                                                                                       |
 | **Ollama**           | `ollama`       | `OLLAMA_HOST`, `OLLAMA_MODEL`                                         | `http://127.0.0.1:11434`, `gemma2`                       | See [Ollama](https://github.com/ollama/ollama)                                                                                                                                                            |
 | **Xinference**       | `xinference`   | `XINFERENCE_HOST`, `XINFERENCE_MODEL`                                 | `http://127.0.0.1:9997`, `gemma-2-it`                    | See [Xinference](https://github.com/xorbitsai/inference)                                                                                                                                                                                        |
-| **OpenAI**           | `openai`       | `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`                   | `https://api.openai.com/v1`, `[Your Key]`, `gpt-4o-mini` | See [OpenAI](https://platform.openai.com/docs/overview)                                                                                                                                                   |
 | **AzureOpenAI**      | `azure-openai` | `AZURE_OPENAI_BASE_URL`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_MODEL` | `[Your Endpoint]`, `[Your Key]`, `gpt-4o-mini`           | See [Azure OpenAI](https://learn.microsoft.com/zh-cn/azure/ai-services/openai/chatgpt-quickstart?tabs=command-line%2Cjavascript-keyless%2Ctypescript-keyless%2Cpython&pivots=programming-language-python) |
 | **Zhipu**            | `zhipu`        | `ZHIPU_API_KEY`, `ZHIPU_MODEL`                                        | `[Your Key]`, `glm-4-flash`                              | See [Zhipu](https://open.bigmodel.cn/dev/api/thirdparty-frame/openai-sdk)                                                                                                                                 |
-| **ModelScope**       | `ModelScope`   | `MODELSCOPE_API_KEY`, `MODELSCOPE_MODEL`                              | `[Your Key]`, `Qwen/Qwen2.5-Coder-32B-Instruct`          | See [ModelScope](https://www.modelscope.cn/docs/model-service/API-Inference/intro)                                                                                                                        |
+| **ModelScope**       | `modelscope`   | `MODELSCOPE_API_KEY`, `MODELSCOPE_MODEL`                              | `[Your Key]`, `Qwen/Qwen2.5-Coder-32B-Instruct`          | See [ModelScope](https://www.modelscope.cn/docs/model-service/API-Inference/intro)                                                                                                                        |
 | **Silicon**          | `silicon`      | `SILICON_API_KEY`, `SILICON_MODEL`                                    | `[Your Key]`, `Qwen/Qwen2.5-7B-Instruct`                 | See [SiliconCloud](https://docs.siliconflow.cn/quickstart)                                                                                                                                                |
 | **Gemini**           | `gemini`       | `GEMINI_API_KEY`, `GEMINI_MODEL`                                      | `[Your Key]`, `gemini-1.5-flash`                         | See [Gemini](https://ai.google.dev/gemini-api/docs/openai)                                                                                                                                                |
 | **Azure**            | `azure`        | `AZURE_ENDPOINT`, `AZURE_API_KEY`                                     | `https://api.translator.azure.cn`, `[Your Key]`          | See [Azure](https://docs.azure.cn/en-us/ai-services/translator/text-translation-overview)                                                                                                                 |
@@ -70,10 +111,12 @@ We've provided a detailed table on the required [environment variables](https://
 | **Dify**             | `dify`         | `DIFY_API_URL`, `DIFY_API_KEY`                                        | `[Your DIFY URL]`, `[Your Key]`                          | See [Dify](https://github.com/langgenius/dify),Three variables, lang_out, lang_in, and text, need to be defined in Dify's workflow input.                                                                 |
 | **AnythingLLM**      | `anythingllm`  | `AnythingLLM_URL`, `AnythingLLM_APIKEY`                               | `[Your AnythingLLM URL]`, `[Your Key]`                   | See [anything-llm](https://github.com/Mintplex-Labs/anything-llm)                                                                                                                                         |
 |**Argos Translate**|`argos`| | |See [argos-translate](https://github.com/argosopentech/argos-translate)|
-|**Grok**|`grok`| `GORK_API_KEY`, `GORK_MODEL` | `[Your GORK_API_KEY]`, `grok-2-1212` |See [Grok](https://docs.x.ai/docs/overview)|
+|**Grok**|`grok`| `GROK_API_KEY`, `GROK_MODEL`, `GROK_BASE_URL` (optional) | `[Your GROK_API_KEY]`, `grok-2-1212`, `https://api.x.ai/v1` |See [Grok](https://docs.x.ai/docs/overview). **Note:** When using custom proxy, ensure `GROK_BASE_URL` ends with `/v1` (e.g., `http://your-proxy:8000/v1`)|
 |**Groq**|`groq`| `GROQ_API_KEY`, `GROQ_MODEL` | `[Your GROQ_API_KEY]`, `llama-3-3-70b-versatile` |See [Groq](https://console.groq.com/docs/models)|
 |**DeepSeek**|`deepseek`| `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL` | `[Your DEEPSEEK_API_KEY]`, `deepseek-chat` |See [DeepSeek](https://www.deepseek.com/)|
+|**MiniMax**|`minimax`| `MINIMAX_API_KEY`, `MINIMAX_MODEL` | `[Your MINIMAX_API_KEY]`, `MiniMax-M2.7` |See [MiniMax](https://platform.minimaxi.com/)|
 |**OpenAI-Liked**|`openailiked`| `OPENAILIKED_BASE_URL`, `OPENAILIKED_API_KEY`, `OPENAILIKED_MODEL` | `url`, `[Your Key]`, `model name` | None |
+|**OpenAI-Liked**|`openailiked`| `OPENAILIKED_BASE_URL`, `OPENAILIKED_API_KEY`, `OPENAILIKED_MODEL`, `OPENAILIKED_STOP_TOKENS`, `OPENAILIKED_MAX_TOKENS` | `url`, `[Your Key]`, `model name`, ` `, `-1` | None |
 |**Ali Qwen Translation**|`qwen-mt`| `ALI_MODEL`, `ALI_API_KEY`, `ALI_DOMAINS` | `qwen-mt-turbo`, `[Your Key]`, `scientific paper` | Tranditional Chinese are not yet supported, it will be translated into Simplified Chinese. More see [Qwen MT](https://bailian.console.aliyun.com/?spm=5176.28197581.0.0.72e329a4HRxe99#/model-market/detail/qwen-mt-turbo) |
 
 For large language models that are compatible with the OpenAI API but not listed in the table above, you can set environment variables using the same method outlined for OpenAI in the table.
@@ -218,6 +261,8 @@ pdf2zh -i --config config.json
 
 example config.json
 
+> **⚠️ Important:** When using OpenAI-compatible APIs or custom proxies (like Grok, OpenAI-liked, etc.), ensure the `BASE_URL` ends with `/v1` (e.g., `https://api.openai.com/v1` or `http://your-proxy:8000/v1`). Missing the `/v1` suffix will result in 404 errors.
+
 ```json
 {
     "USE_MODELSCOPE": "0",
@@ -237,6 +282,14 @@ example config.json
             "envs": {
                 "OLLAMA_HOST": "http://127.0.0.1:11434",
                 "OLLAMA_MODEL": "gemma2"
+            }
+        },
+        {
+            "name": "grok",
+            "envs": {
+                "GROK_BASE_URL": "https://api.x.ai/v1",
+                "GROK_API_KEY": "your-api-key",
+                "GROK_MODEL": "grok-2-1212"
             }
         }
     ]
@@ -284,6 +337,8 @@ configuration file. Among them:
 
 A usable configuration is as follows:
 
+> **⚠️ Important:** The `BASE_URL` must end with `/v1` for OpenAI-compatible APIs.
+
 ```json
 {
     "USE_MODELSCOPE": "0",
@@ -291,8 +346,9 @@ A usable configuration is as follows:
         {
             "name": "grok",
             "envs": {
-                "GORK_API_KEY": null,
-                "GORK_MODEL": "grok-2-1212"
+                "GROK_BASE_URL": "https://api.x.ai/v1",
+                "GROK_API_KEY": "your-api-key",
+                "GROK_MODEL": "grok-2-1212"
             }
         },
         {
